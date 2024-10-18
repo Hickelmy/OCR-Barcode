@@ -1,97 +1,99 @@
-from paddleocr import PaddleOCR 
-import json
-from PIL import Image
-import gradio as gr
+from flask import Flask, request, jsonify
+from paddleocr import PaddleOCR
+from PIL import Image, UnidentifiedImageError
+import base64
 import numpy as np
-import cv2
+from io import BytesIO
+import os
+from pymongo import MongoClient
+import datetime
+import gridfs
 
-def get_random_color():
-    c = tuple(np.random.randint(0, 256, 3).tolist())
-    return c
+app = Flask(__name__)
 
-def draw_ocr_bbox(image, boxes, colors):
-    box_num = len(boxes)
-    for i in range(box_num):
-        box = np.reshape(np.array(boxes[i]), [-1, 1, 2]).astype(np.int64)
-        image = cv2.polylines(np.array(image), [box], True, colors[i], 2)
-    return image
+# Conectar ao MongoDB
+mongo_client = MongoClient('mongodb://localhost:27017/')
+db = mongo_client['ocr_database']
+fs = gridfs.GridFS(db)
 
-def inference(img: Image.Image, lang, confidence):
-    # Carregando o OCR sem download dinâmico
-    ocr = PaddleOCR(
-        use_angle_cls=True,
-        lang=lang,
-        use_gpu=False,
-        det_model_dir='./models/en_PP-OCRv3_det_infer',  # Caminho local para o modelo de detecção
-        rec_model_dir='./models/en_PP-OCRv3_rec_infer',  # Caminho local para o modelo de reconhecimento
-        cls_model_dir='./models/en_PP-OCRv3_cls_infer'   # Caminho local para o modelo de classificação de ângulo
-    )
+# Inicializando o PaddleOCR com modelos locais
+ocr = PaddleOCR(
+    use_angle_cls=True, 
+    lang='en', 
+    use_gpu=False, 
+    det_model_dir='models/ch_PP-OCRv4_det_infer',
+    rec_model_dir='models/ch_PP-OCRv4_rec_infer'
+)
 
+def save_image_to_folder(image, folder_path, filename):
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path)
+    image_path = os.path.join(folder_path, filename)
+    image.save(image_path)
+    return image_path
+
+def process_image(img: Image.Image, confidence):
     img2np = np.array(img)
     result = ocr.ocr(img2np, cls=True)[0]
-
-    # Converter imagem para RGB
+    
+    # Convertendo a imagem para RGB
     image = img.convert('RGB')
     boxes = [line[0] for line in result]
     txts = [line[1][0] for line in result]
     scores = [line[1][1] for line in result]
-
-    final_result = [
-        dict(boxes=box, txt=txt, score=score, _c=get_random_color())
-        for box, txt, score in zip(boxes, txts, scores)
-    ]
+    
+    final_result = [dict(boxes=box, txt=txt, score=score) for box, txt, score in zip(boxes, txts, scores)]
     final_result = [item for item in final_result if item['score'] > confidence]
 
-    im_show = draw_ocr_bbox(image, [item['boxes'] for item in final_result], [item['_c'] for item in final_result])
-    im_show = Image.fromarray(im_show)
-    data = [[json.dumps(item['boxes']), round(item['score'], 3), item['txt']] for item in final_result]
-    return im_show, data
+    return final_result
 
-def webcam_feed():
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FPS, 30)  
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        # Aplicar espelhamento da imagem
-        frame = cv2.flip(frame, 0)
-
-        # Exibir o feed da webcam
-        cv2.imshow('Webcam Feed', frame)
+@app.route('/process_image', methods=['POST'])
+def process_base64_image():
+    try:
+        data = request.get_json()
+        image_b64 = data['image']
+        confidence = data.get('confidence', 0.5)
         
-        # Encerrar ao pressionar a tecla 'q'
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+        # Ajuste no padding para evitar erros de decodificação
+        missing_padding = len(image_b64) % 4
+        if missing_padding:
+            image_b64 += '=' * (4 - missing_padding)
+        
+        # Removendo o prefixo "data:image/png;base64,"
+        if image_b64.startswith('data:image'):
+            image_b64 = image_b64.split(',')[1]
+        
+        # Decodificando a imagem base64
+        try:
+            image_data = base64.b64decode(image_b64)
+            image = Image.open(BytesIO(image_data))
+        except (UnidentifiedImageError, base64.binascii.Error):
+            return jsonify({'error': 'Cannot identify image file. Please check the input format.'})
+        
+        # Salvando a imagem original na pasta "camera_img"
+        original_image_path = save_image_to_folder(image, 'camera_img', 'original_image.png')
+        
+        # Processando a imagem com OCR
+        ocr_data = process_image(image, confidence)
+        
+        # Salvando a imagem processada na pasta "ocr_img"
+        processed_image_path = save_image_to_folder(image, 'ocr_img', 'ocr_image.png')
+        
+        # Salvando a imagem processada no MongoDB com GridFS
+        with open(processed_image_path, 'rb') as f:
+            processed_image_id = fs.put(f, filename="processed_image.png")
+        
+        # Salvando os dados do OCR no MongoDB
+        ocr_entry = {
+            'processed_image_id': processed_image_id,
+            'ocr_data': ocr_data,
+            'timestamp': datetime.datetime.now()
+        }
+        db.ocr_entries.insert_one(ocr_entry)
+        
+        return jsonify({'message': 'Image and OCR data saved successfully', 'image_id': str(processed_image_id)})
+    except Exception as e:
+        return jsonify({'error': str(e)})
 
-    cap.release()
-    cv2.destroyAllWindows()
-
-if __name__ == '__main__':
-    demo = gr.Interface(
-        inference,
-        [
-            gr.Image(type='pil', label='Input'),
-            gr.Dropdown(choices=['ch', 'en', 'fr', 'german', 'korean', 'japan'], value='ch', label='language'),
-            gr.Slider(0.1, 1, 0.5, step=0.1, label='confidence_threshold')
-        ],
-        [
-            gr.Image(type='pil', label='Output'),
-            gr.Dataframe(headers=['bbox', 'score', 'text'], label='Result')
-        ],
-        title='Projeto Label',
-        description='Teste de OCR',
-        examples=[
-            ['example_imgs/img1.webp', 'en', 0.5],
-            ['example_imgs/img2.webp', 'en', 0.7],
-            ['example_imgs/img3.jpg', 'en', 0.7],
-        ],
-        css=".output_image, .input_image {height: 40rem !important; width: 100% !important;}"
-    )
-    demo.queue(max_size=10)
-    demo.launch(debug=True, server_name="127.0.0.1")
-
-    # Iniciar feed da webcam
-    webcam_feed()
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=5000, debug=False)

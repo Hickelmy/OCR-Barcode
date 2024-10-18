@@ -82,6 +82,13 @@ def processar_imagem():
     cv2.imwrite(caminho_arquivo_caixas, imagem_com_caixas)
     print(f'Imagem com caixas salva em: {caminho_arquivo_caixas}')
     
+    # Salvar a imagem original com todas as áreas de OCR demarcadas com cores diferentes
+    colors_diferentes = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255)]
+    imagem_com_caixas_diferentes = draw_ocr_bbox(imagem, boxes, [colors_diferentes[i % len(colors_diferentes)] for i in range(len(boxes))])
+    caminho_arquivo_caixas_diferentes = os.path.join(caminho_pasta, f'caixas_diferentes_{nome_arquivo}')
+    cv2.imwrite(caminho_arquivo_caixas_diferentes, imagem_com_caixas_diferentes)
+    print(f'Imagem com caixas coloridas salva em: {caminho_arquivo_caixas_diferentes}')
+    
     return jsonify({'texto_extraido': texto_extraido})
 
 if __name__ == '__main__':
