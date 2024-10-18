@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 from flask import Flask, request, jsonify
 from paddleocr import PaddleOCR
+from io import BytesIO
 
 app = Flask(__name__)
 ocr = PaddleOCR()
@@ -55,6 +56,11 @@ def draw_ocr_bbox(image, boxes, colors):
         image = cv2.polylines(np.array(image), [box], True, colors[i], 2)
     return image
 
+def imagem_para_base64(imagem):
+    _, buffer = cv2.imencode('.png', imagem)
+    imagem_base64 = base64.b64encode(buffer).decode('utf-8')
+    return f'data:image/png;base64,{imagem_base64}'
+
 @app.route('/processar_imagem', methods=['POST'])
 def processar_imagem():
     data = request.get_json()
@@ -82,14 +88,10 @@ def processar_imagem():
     cv2.imwrite(caminho_arquivo_caixas, imagem_com_caixas)
     print(f'Imagem com caixas salva em: {caminho_arquivo_caixas}')
     
-    # Salvar a imagem original com todas as áreas de OCR demarcadas com cores diferentes
-    colors_diferentes = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255)]
-    imagem_com_caixas_diferentes = draw_ocr_bbox(imagem, boxes, [colors_diferentes[i % len(colors_diferentes)] for i in range(len(boxes))])
-    caminho_arquivo_caixas_diferentes = os.path.join(caminho_pasta, f'caixas_diferentes_{nome_arquivo}')
-    cv2.imwrite(caminho_arquivo_caixas_diferentes, imagem_com_caixas_diferentes)
-    print(f'Imagem com caixas coloridas salva em: {caminho_arquivo_caixas_diferentes}')
+    # Converter a imagem com as caixas para Base64
+    imagem_com_caixas_base64 = imagem_para_base64(imagem_com_caixas)
     
-    return jsonify({'texto_extraido': texto_extraido})
+    return jsonify({'texto_extraido': texto_extraido, 'imagem_com_caixas_base64': imagem_com_caixas_base64})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)

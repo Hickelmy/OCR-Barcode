@@ -1,88 +1,65 @@
-import base64
-import os
-import cv2
-import numpy as np
-from flask import Flask, request, jsonify
 from paddleocr import PaddleOCR
+import json
+from PIL import Image
+import gradio as gr
+import numpy as np
+import cv2
 
-app = Flask(__name__)
-ocr = PaddleOCR()
-
-def salvar_imagem_base64(base64_string, caminho_pasta, nome_arquivo):
-    # Decodifica o string Base64 para bytes de imagem
-    imagem_bytes = base64.b64decode(base64_string)
-    
-    # Converte bytes de imagem para um array NumPy
-    np_arr = np.frombuffer(imagem_bytes, np.uint8)
-    imagem = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-    
-    # Cria a pasta caso não exista
-    if not os.path.exists(caminho_pasta):
-        os.makedirs(caminho_pasta)
-    
-    # Cria o caminho completo do arquivo
-    caminho_arquivo = os.path.join(caminho_pasta, nome_arquivo)
-    
-    # Salva a imagem usando OpenCV
-    cv2.imwrite(caminho_arquivo, imagem)
-
-    print(f'Imagem salva em: {caminho_arquivo}')
-    return imagem
-
-def realizar_ocr(imagem, lang='en', confidence=0.5):
-    # Realiza OCR usando PaddleOCR
-    resultados = ocr.ocr(imagem, cls=True)
-    if resultados is None:
-        return ""
-    
-    resultado_texto = []
-    boxes = []
-    for linha in resultados:
-        if linha is None:
-            continue
-        for res in linha:
-            texto, conf = res[1]
-            if conf >= confidence:
-                resultado_texto.append(texto)
-                boxes.append(res[0])
-    
-    return ' '.join(resultado_texto), boxes
+def get_random_color():
+    c = tuple(np.random.randint(0, 256, 3).tolist())
+    return c
 
 def draw_ocr_bbox(image, boxes, colors):
+    print(colors)
     box_num = len(boxes)
     for i in range(box_num):
         box = np.reshape(np.array(boxes[i]), [-1, 1, 2]).astype(np.int64)
         image = cv2.polylines(np.array(image), [box], True, colors[i], 2)
     return image
 
-@app.route('/processar_imagem', methods=['POST'])
-def processar_imagem():
-    data = request.get_json()
-    base64_string = data.get('image')
-    if base64_string and base64_string.startswith('data:image/'):
-        base64_string = base64_string.split(',', 1)[1]
-    
-    caminho_pasta = data.get('caminho_pasta', 'imagens')
-    nome_arquivo = data.get('nome_arquivo', 'imagem.png')
-    lang = data.get('lang', 'en')
-    confidence = data.get('confidence', 0.5)
 
-    if not base64_string:
-        return jsonify({'error': 'Base64 string não fornecida'}), 400
+def inference(img: Image.Image, lang, confidence):
+    ocr = PaddleOCR(use_angle_cls=True, lang=lang, use_gpu=True)
+    # img_path = img.name
+    img2np = np.array(img)
+    result = ocr.ocr(img2np, cls=True)[0]
+    # rgb
+    image = img.convert('RGB')
+    boxes = [line[0] for line in result]
+    txts = [line[1][0] for line in result]
+    scores = [line[1][1] for line in result]
+    
+    final_result = [dict(boxes=box, txt=txt, score=score, _c=get_random_color()) for box, txt, score in zip(boxes, txts, scores)]
+    final_result = [item for item in final_result if item['score'] > confidence]
 
-    imagem = salvar_imagem_base64(base64_string, caminho_pasta, nome_arquivo)
-    texto_extraido, boxes = realizar_ocr(imagem, lang, confidence)
-    
-    # Desenhar as caixas delimitadoras na imagem
-    colors = [(0, 255, 0)] * len(boxes)  # Usar a cor verde para todas as caixas
-    imagem_com_caixas = draw_ocr_bbox(imagem, boxes, colors)
-    
-    # Salvar a imagem com as caixas
-    caminho_arquivo_caixas = os.path.join(caminho_pasta, f'caixas_{nome_arquivo}')
-    cv2.imwrite(caminho_arquivo_caixas, imagem_com_caixas)
-    print(f'Imagem com caixas salva em: {caminho_arquivo_caixas}')
-    
-    return jsonify({'texto_extraido': texto_extraido})
+    im_show = draw_ocr_bbox(image, [item['boxes'] for item in final_result], [item['_c'] for item in final_result])
+    im_show = Image.fromarray(im_show)
+    data = [[json.dumps(item['boxes']), round(item['score'], 3), item['txt']] for item in final_result]
+    return im_show, data
+
+title = 'Porjeto Label'
+description = 'Teste de OCR'
+
+examples = [
+    ['example_imgs/img1.webp','en', 0.5],
+    ['example_imgs/img2.webp','en', 0.7],
+    ['example_imgs/img3.jpg','en', 0.7],
+]
+
+css = ".output_image, .input_image {height: 40rem !important; width: 100% !important;}"
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    demo = gr.Interface(
+        inference,
+        [gr.Image(type='pil', label='Input'),
+        gr.Dropdown(choices=['ch', 'en', 'fr', 'german', 'korean', 'japan'], value='ch', label='language'),
+        gr.Slider(0.1, 1, 0.5, step=0.1, label='confidence_threshold')
+        ],
+        [gr.Image(type='pil', label='Output'), gr.Dataframe(headers=[ 'bbox', 'score', 'text'], label='Result')],
+        title=title,
+        description=description,
+        examples=examples,
+        css=css,
+    )
+    demo.queue(max_size=10)
+    demo.launch(debug=True, server_name="127.0.0.1")
